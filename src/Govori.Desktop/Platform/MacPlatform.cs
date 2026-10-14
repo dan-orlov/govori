@@ -118,7 +118,8 @@ internal sealed class MacHotkeys : HotkeyState
     }
     public override Hotkey Dictation { get => base.Dictation; set { Validate(value); base.Dictation = value; } }
     public override Hotkey History { get => base.History; set { Validate(value); base.History = value; } }
-    private static void Validate(Hotkey hotkey) { if (!MacPlatform.Keycodes.ContainsKey(hotkey.Key)) throw new FormatException(Localization.T("MacUnsupportedKey")); }
+    // CapsLock only reports its lock state on macOS, so it cannot be held.
+    private static void Validate(Hotkey hotkey) { if (hotkey.Key == 0x14 || !MacPlatform.Keycodes.ContainsKey(hotkey.Key)) throw new FormatException(Localization.T("MacUnsupportedKey")); }
     private bool OnKey(int code, bool down, bool up, bool injected, ulong flags)
     {
         if (!Keys.TryGetValue(code, out int key)) { if (down && !injected) CancelChord(); return false; }
@@ -171,7 +172,7 @@ internal sealed class MacKeyTap : IDisposable
     private readonly Callback callback;
     private readonly Thread thread;
     private volatile bool stopping;
-    private nint port, loop;
+    private nint port, pointer, loop;
     internal bool Alive => thread.IsAlive;
     private MacKeyTap(Handler handler)
     {
@@ -188,30 +189,35 @@ internal sealed class MacKeyTap : IDisposable
     }
     private void Run(ManualResetEventSlim started)
     {
-        // Key down, key up, flags changed, and mouse button downs (they also end a RightAlt chord).
-        const ulong events = (1ul << 10) | (1ul << 11) | (1ul << 12) | (1ul << 1) | (1ul << 3) | (1ul << 25);
+        const ulong keys = (1ul << 10) | (1ul << 11) | (1ul << 12); // key down, key up, flags changed
+        // Mouse button downs and scrolling also end a RightAlt chord. They are
+        // only observed, so a listen-only tap keeps clicks from waiting on Govori.
+        const ulong pointers = (1ul << 1) | (1ul << 3) | (1ul << 25) | (1ul << 22);
         // The HID level comes before system shortcuts such as Ctrl+Space.
-        port = Native.TapCreate(0, 0, 0, events, callback, 0);
-        if (port == 0) port = Native.TapCreate(1, 0, 0, events, callback, 0);
+        port = Native.TapCreate(0, 0, 0, keys, callback, 0);
+        if (port == 0) port = Native.TapCreate(1, 0, 0, keys, callback, 0);
         if (port == 0) { started.Set(); return; }
-        nint source = Native.CreateRunLoopSource(0, port, 0);
+        pointer = Native.TapCreate(1, 0, 1, pointers, callback, 0);
         loop = Native.Retain(Native.CurrentRunLoop());
+        nint source = Native.CreateRunLoopSource(0, port, 0), pointerSource = pointer == 0 ? 0 : Native.CreateRunLoopSource(0, pointer, 0);
         Native.AddSource(loop, source, Native.CommonModes);
+        if (pointerSource != 0) Native.AddSource(loop, pointerSource, Native.CommonModes);
         Native.TapEnable(port, true);
         started.Set();
         // A stop request can arrive before the loop runs, and an invalidated tap finishes it.
         while (!stopping && Native.RunInMode(Native.DefaultMode, 1, false) != 1) { }
         Native.TapEnable(port, false); Native.Invalidate(port); Native.Release(source); Native.Release(port);
+        if (pointer != 0) { Native.Invalidate(pointer); Native.Release(pointerSource); Native.Release(pointer); }
     }
     private nint OnEvent(nint proxy, uint type, nint e, nint user)
     {
         // macOS disables a tap after a timeout or user input; turn it back on.
-        if (type is 0xFFFFFFFE or 0xFFFFFFFF) { Native.TapEnable(port, true); return e; }
+        if (type is 0xFFFFFFFE or 0xFFFFFFFF) { Native.TapEnable(port, true); if (pointer != 0) Native.TapEnable(pointer, true); return e; }
         try
         {
             bool injected = Native.IntegerField(e, 41) == Environment.ProcessId; // kCGEventSourceUnixProcessID: our own Command+V
             ulong flags = Native.Flags(e);
-            if (type is 1 or 3 or 25) { handler(-1, true, false, injected, flags); return e; }
+            if (type is 1 or 3 or 25 or 22) { handler(-1, true, false, injected, flags); return e; }
             int code = (int)Native.IntegerField(e, 9); // kCGKeyboardEventKeycode
             bool down = type == 10, up = type == 11;
             if (type == 12)

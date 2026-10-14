@@ -149,7 +149,7 @@ internal static partial class Verification
             var shortcut = controller.Hotkeys.Dictation;
             var readyWait = Stopwatch.StartNew();
             Check(realHook.HandleKey(shortcut.Key, true, false, false, true), "dictation shortcut is handled by the live controller hook");
-            await Task.Delay(40); // Let the dispatched StartRecording run before observing its state.
+            await Task.Delay(shortcut.Key is 0xA3 or 0xA5 ? HotkeyState.ChordDelay + TimeSpan.FromMilliseconds(40) : TimeSpan.FromMilliseconds(40)); // Let the dispatched StartRecording run before observing its state.
             while (controller.Recording && !controller.RecordingReady && readyWait.Elapsed.TotalSeconds < 6) await Task.Delay(40);
             if (controller.RecordingReady)
             {

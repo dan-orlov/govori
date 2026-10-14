@@ -1,4 +1,4 @@
-<Application xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="Govori.App" RequestedThemeVariant="Light">
+<Application xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="Govori.App" Name="Govori" RequestedThemeVariant="Light">
   <Application.Resources>
     <Color x:Key="SystemAccentColor">#7160DF</Color>
     <Color x:Key="SystemAccentColorDark1">#6250CD</Color>

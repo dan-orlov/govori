@@ -87,7 +87,8 @@ internal abstract class HotkeyState : IGlobalHotkeys
             if (up && holding && ((Dictation.Ctrl && key is 0x11 or 0xA2 or 0xA3) || (Dictation.Alt && key is 0x12 or 0xA4 or 0xA5) || (Dictation.Shift && key is 0x10 or 0xA0 or 0xA1) || (Dictation.Win && key is 0x5B or 0x5C))) Release();
             if (up && swallowed.Remove(key)) { if (key == Dictation.Key && holding) Release(); return true; }
             if (!down) return false;
-            if (key is not (0x1B or 0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5 or 0x5B or 0x5C)) CancelChord();
+            // Esc also drops a hold that has not started; once started it cancels below.
+            if (key == 0x1B ? !started : key is not (0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5 or 0x5B or 0x5C)) CancelChord();
             if (swallowed.Contains(key)) return true;
             if (Recording && key == 0x1B) { swallowed.Add(key); holding = started = false; Recording = false; Cancelled?.Invoke(); return true; }
             if (!Enabled) return false;

@@ -53,21 +53,28 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 PLIST
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 # Hardened runtime ignores DYLD_* variables, so other processes cannot load
-# code into Govori to use its permissions. .NET needs JIT; the ad-hoc signed
-# libraries have no Team ID, which library validation would reject.
+# code into Govori to use its permissions; .NET needs JIT.
+# GOVORI_SIGN_IDENTITY (for example an "Apple Development" certificate) adds
+# library validation, which also rejects .NET profiler libraries, and keeps
+# permissions across rebuilds. Without it the ad-hoc signed libraries have no
+# Team ID, so library validation has to stay off and macOS asks for
+# permissions again after every rebuild.
+identity="${GOVORI_SIGN_IDENTITY:--}"
+validation=""
+if [ "$identity" = "-" ]; then validation="<key>com.apple.security.cs.disable-library-validation</key><true/>"; fi
 entitlements="artifacts/macos/$rid/govori.entitlements"
-cat > "$entitlements" <<'PLIST'
+cat > "$entitlements" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>com.apple.security.cs.allow-jit</key><true/>
-  <key>com.apple.security.cs.disable-library-validation</key><true/>
   <key>com.apple.security.device.audio-input</key><true/>
+  $validation
 </dict>
 </plist>
 PLIST
-# Ad-hoc signature: macOS asks for permissions again after every rebuild.
-for library in "$app"/Contents/MacOS/*.dylib; do codesign --force --options runtime --sign - "$library"; done
-codesign --force --options runtime --entitlements "$entitlements" --sign - "$app"
+plutil -lint "$entitlements" >/dev/null
+for library in "$app"/Contents/MacOS/*.dylib; do codesign --force --options runtime --sign "$identity" "$library"; done
+codesign --force --options runtime --entitlements "$entitlements" --sign "$identity" "$app"
 echo "Built: $app"
