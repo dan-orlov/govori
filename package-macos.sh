@@ -52,6 +52,22 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 plutil -lint "$app/Contents/Info.plist" >/dev/null
+# Hardened runtime ignores DYLD_* variables, so other processes cannot load
+# code into Govori to use its permissions. .NET needs JIT; the ad-hoc signed
+# libraries have no Team ID, which library validation would reject.
+entitlements="artifacts/macos/$rid/govori.entitlements"
+cat > "$entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>
+PLIST
 # Ad-hoc signature: macOS asks for permissions again after every rebuild.
-codesign --force --deep --sign - "$app"
+for library in "$app"/Contents/MacOS/*.dylib; do codesign --force --options runtime --sign - "$library"; done
+codesign --force --options runtime --entitlements "$entitlements" --sign - "$app"
 echo "Built: $app"

@@ -7,7 +7,7 @@ namespace Govori;
 
 public sealed class Settings
 {
-    // macOS uses Ctrl+Space to switch input sources and cannot suppress it.
+    // macOS uses Ctrl+Space to switch input sources.
     public string Hotkey { get; set; } = OperatingSystem.IsMacOS() ? "RightAlt" : "Ctrl+Space";
     public string HistoryHotkey { get; set; } = "Ctrl+Alt+J";
     public string Model { get; set; } = "gemini-2.5-flash";

@@ -23,7 +23,7 @@ internal interface IGlobalHotkeys : IDisposable
     Hotkey History { get; set; }
     bool Enabled { get; set; }
     bool Recording { get; set; }
-    event Action? Pressed, Released, Cancelled, HistoryRequested;
+    event Action? Pressed, Released, Cancelled, Discarded, HistoryRequested;
 }
 
 internal static class DesktopPlatform
@@ -62,8 +62,14 @@ public sealed record Hotkey(int Key, bool Ctrl, bool Alt, bool Shift, bool Win, 
 
 internal abstract class HotkeyState : IGlobalHotkeys
 {
+    // RightAlt and RightCtrl are also typing modifiers (Option+arrow, AltGr).
+    // Wait this long before starting so that chords never open the microphone.
+    internal static readonly TimeSpan ChordDelay = TimeSpan.FromMilliseconds(200);
     private readonly HashSet<int> swallowed = [];
-    private bool holding;
+    // Keys arrive on a hook or tap thread while the chord delay runs on the pool.
+    private readonly object gate = new();
+    private bool holding, started;
+    private int holds;
     private volatile bool enabled = true, recording;
     private volatile Hotkey dictation = null!, history = null!;
     protected readonly IDesktopPlatform Platform;
@@ -71,31 +77,45 @@ internal abstract class HotkeyState : IGlobalHotkeys
     public virtual Hotkey History { get => history; set => history = value; }
     public bool Enabled { get => enabled; set => enabled = value; }
     public bool Recording { get => recording; set => recording = value; }
-    public event Action? Pressed, Released, Cancelled, HistoryRequested;
+    public event Action? Pressed, Released, Cancelled, Discarded, HistoryRequested;
     protected HotkeyState(IDesktopPlatform platform, Hotkey dictation, Hotkey history) { Platform = platform; Dictation = dictation; History = history; }
     internal bool HandleKey(int key, bool down, bool up, bool injected, bool? match = null)
     {
         if (injected) return false;
-        if (up && holding && ((Dictation.Ctrl && key is 0x11 or 0xA2 or 0xA3) || (Dictation.Alt && key is 0x12 or 0xA4 or 0xA5) || (Dictation.Shift && key is 0x10 or 0xA0 or 0xA1) || (Dictation.Win && key is 0x5B or 0x5C))) { holding = false; Released?.Invoke(); }
-        if (up && swallowed.Remove(key)) { if (key == Dictation.Key && holding) { holding = false; Released?.Invoke(); } return true; }
-        if (!down) return false;
-        if (key is not (0x1B or 0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5 or 0x5B or 0x5C)) CancelChord();
-        if (swallowed.Contains(key)) return true;
-        if (Recording && key == 0x1B) { swallowed.Add(key); holding = false; Recording = false; Cancelled?.Invoke(); return true; }
-        if (!Enabled) return false;
-        if (key == History.Key && (match ?? History.Matches(Platform))) { swallowed.Add(key); HistoryRequested?.Invoke(); return true; }
-        if (key == Dictation.Key && (match ?? Dictation.Matches(Platform))) { swallowed.Add(key); holding = true; Pressed?.Invoke(); return true; }
-        return false;
+        lock (gate)
+        {
+            if (up && holding && ((Dictation.Ctrl && key is 0x11 or 0xA2 or 0xA3) || (Dictation.Alt && key is 0x12 or 0xA4 or 0xA5) || (Dictation.Shift && key is 0x10 or 0xA0 or 0xA1) || (Dictation.Win && key is 0x5B or 0x5C))) Release();
+            if (up && swallowed.Remove(key)) { if (key == Dictation.Key && holding) Release(); return true; }
+            if (!down) return false;
+            if (key is not (0x1B or 0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5 or 0x5B or 0x5C)) CancelChord();
+            if (swallowed.Contains(key)) return true;
+            if (Recording && key == 0x1B) { swallowed.Add(key); holding = started = false; Recording = false; Cancelled?.Invoke(); return true; }
+            if (!Enabled) return false;
+            if (key == History.Key && (match ?? History.Matches(Platform))) { swallowed.Add(key); HistoryRequested?.Invoke(); return true; }
+            if (key == Dictation.Key && (match ?? Dictation.Matches(Platform)))
+            {
+                swallowed.Add(key); holding = true; int hold = ++holds;
+                if (Dictation.Key is 0xA3 or 0xA5) _ = Task.Delay(ChordDelay).ContinueWith(_ => { lock (gate) if (holding && hold == holds) Start(); });
+                else Start();
+                return true;
+            }
+            return false;
+        }
     }
+    private void Start() { started = true; Pressed?.Invoke(); }
+    private void Release() { holding = false; if (started) { started = false; Released?.Invoke(); } }
     protected bool Holding => holding;
-    // RightAlt and RightCtrl are also typing modifiers (Option+arrow, AltGr).
-    // Another key pressed while one is held as the dictation key makes a
-    // chord, so the recording is dropped instead of transcribed and pasted.
+    // Another key or a click while RightAlt or RightCtrl is held as the
+    // dictation key makes a chord: drop the recording instead of sending it.
     protected void CancelChord()
     {
-        if (!holding || Dictation.Key is not (0xA3 or 0xA5)) return;
-        holding = false;
-        if (Recording) { Recording = false; Cancelled?.Invoke(); }
+        lock (gate)
+        {
+            if (!holding || Dictation.Key is not (0xA3 or 0xA5)) return;
+            holding = false;
+            // Esc right after a chord must not cancel again: that would stop in-flight transcriptions.
+            if (started) { started = false; Recording = false; Discarded?.Invoke(); }
+        }
     }
     public abstract void Dispose();
 }

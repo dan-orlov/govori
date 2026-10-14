@@ -40,6 +40,8 @@ internal sealed class DictationController : IDisposable
         Hotkeys.Pressed += () => Dispatcher.UIThread.Post(StartRecording);
         Hotkeys.Released += () => Dispatcher.UIThread.Post(() => _ = StopRecordingAsync());
         Hotkeys.Cancelled += () => Dispatcher.UIThread.Post(Cancel);
+        // Posted after StartRecording, so a recording that was still opening is dropped too.
+        Hotkeys.Discarded += () => Dispatcher.UIThread.Post(() => { if (Recording) { cancelled = true; _ = StopRecordingAsync(); } });
         Hotkeys.HistoryRequested += () => Dispatcher.UIThread.Post(() => window?.OpenHistory());
         timer.Tick += (_, _) =>
         {

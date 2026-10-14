@@ -136,8 +136,9 @@ internal sealed class MacHotkeys : HotkeyState
             for (int tick = 0; !cancellation.IsCancellationRequested; tick++)
             {
                 // Accessibility can be granted while Govori runs.
+                if (tap is { Alive: false }) { tap.Dispose(); tap = null; }
                 if (tap == null && tick % 100 == 0 && MacPlatform.Trusted) tap = MacKeyTap.TryStart(OnKey);
-                if (tap != null) { previous.Clear(); keyDowns = null; await Task.Delay(100, cancellation.Token); continue; }
+                if (tap != null) { previous.Clear(); keyDowns = null; await Task.Delay(1000, cancellation.Token); continue; }
                 foreach (int key in new[] { Dictation.Key, History.Key, 0x1B, 0x11, 0xA3, 0x12, 0xA5, 0x10, 0xA1, 0x5B, 0x5C }.Distinct())
                 {
                     bool down = Platform.IsDown(key), was = previous.Contains(key);
@@ -169,7 +170,9 @@ internal sealed class MacKeyTap : IDisposable
     private readonly Handler handler;
     private readonly Callback callback;
     private readonly Thread thread;
+    private volatile bool stopping;
     private nint port, loop;
+    internal bool Alive => thread.IsAlive;
     private MacKeyTap(Handler handler)
     {
         this.handler = handler; callback = OnEvent;
@@ -185,17 +188,19 @@ internal sealed class MacKeyTap : IDisposable
     }
     private void Run(ManualResetEventSlim started)
     {
-        const ulong keys = (1ul << 10) | (1ul << 11) | (1ul << 12); // key down, key up, flags changed
+        // Key down, key up, flags changed, and mouse button downs (they also end a RightAlt chord).
+        const ulong events = (1ul << 10) | (1ul << 11) | (1ul << 12) | (1ul << 1) | (1ul << 3) | (1ul << 25);
         // The HID level comes before system shortcuts such as Ctrl+Space.
-        port = Native.TapCreate(0, 0, 0, keys, callback, 0);
-        if (port == 0) port = Native.TapCreate(1, 0, 0, keys, callback, 0);
+        port = Native.TapCreate(0, 0, 0, events, callback, 0);
+        if (port == 0) port = Native.TapCreate(1, 0, 0, events, callback, 0);
         if (port == 0) { started.Set(); return; }
         nint source = Native.CreateRunLoopSource(0, port, 0);
-        loop = Native.CurrentRunLoop();
+        loop = Native.Retain(Native.CurrentRunLoop());
         Native.AddSource(loop, source, Native.CommonModes);
         Native.TapEnable(port, true);
         started.Set();
-        Native.RunLoop();
+        // A stop request can arrive before the loop runs, and an invalidated tap finishes it.
+        while (!stopping && Native.RunInMode(Native.DefaultMode, 1, false) != 1) { }
         Native.TapEnable(port, false); Native.Invalidate(port); Native.Release(source); Native.Release(port);
     }
     private nint OnEvent(nint proxy, uint type, nint e, nint user)
@@ -204,9 +209,10 @@ internal sealed class MacKeyTap : IDisposable
         if (type is 0xFFFFFFFE or 0xFFFFFFFF) { Native.TapEnable(port, true); return e; }
         try
         {
-            int code = (int)Native.IntegerField(e, 9); // kCGKeyboardEventKeycode
             bool injected = Native.IntegerField(e, 41) == Environment.ProcessId; // kCGEventSourceUnixProcessID: our own Command+V
             ulong flags = Native.Flags(e);
+            if (type is 1 or 3 or 25) { handler(-1, true, false, injected, flags); return e; }
+            int code = (int)Native.IntegerField(e, 9); // kCGKeyboardEventKeycode
             bool down = type == 10, up = type == 11;
             if (type == 12)
             {
@@ -220,8 +226,8 @@ internal sealed class MacKeyTap : IDisposable
     }
     public void Dispose()
     {
-        Running = false;
-        Native.StopRunLoop(loop); thread.Join(1000);
+        stopping = true; Running = false;
+        Native.StopRunLoop(loop); thread.Join(1000); Native.Release(loop);
     }
     private static class Native
     {
@@ -235,9 +241,12 @@ internal sealed class MacKeyTap : IDisposable
         [DllImport(Foundation, EntryPoint="CFMachPortInvalidate")] internal static extern void Invalidate(nint port);
         [DllImport(Foundation, EntryPoint="CFRunLoopGetCurrent")] internal static extern nint CurrentRunLoop();
         [DllImport(Foundation, EntryPoint="CFRunLoopAddSource")] internal static extern void AddSource(nint loop, nint source, nint mode);
-        [DllImport(Foundation, EntryPoint="CFRunLoopRun")] internal static extern void RunLoop();
+        [DllImport(Foundation, EntryPoint="CFRunLoopRunInMode")] internal static extern int RunInMode(nint mode, double seconds, [MarshalAs(UnmanagedType.I1)] bool returnAfterSourceHandled);
+        [DllImport(Foundation, EntryPoint="CFRetain")] internal static extern nint Retain(nint value);
         [DllImport(Foundation, EntryPoint="CFRunLoopStop")] internal static extern void StopRunLoop(nint loop);
         [DllImport(Foundation, EntryPoint="CFRelease")] internal static extern void Release(nint value);
-        internal static nint CommonModes => Marshal.ReadIntPtr(NativeLibrary.GetExport(NativeLibrary.Load(Foundation), "kCFRunLoopCommonModes"));
+        internal static nint CommonModes => Constant("kCFRunLoopCommonModes");
+        internal static nint DefaultMode => Constant("kCFRunLoopDefaultMode");
+        private static nint Constant(string name) => Marshal.ReadIntPtr(NativeLibrary.GetExport(NativeLibrary.Load(Foundation), name));
     }
 }
