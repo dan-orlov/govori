@@ -30,7 +30,7 @@ Open **Settings → Gemini key**, paste your key. It saves automatically after a
 
 For LiteLLM, select **Settings → Service → LiteLLM key**, enter your proxy's HTTPS URL (the root or its `/v1` URL). The model list loads automatically. The app reads `LITELLM_API_KEY` automatically, including Windows user and machine environment variables set after the app was launched. Alternatively save the LiteLLM key in Settings; it is stored separately in `litellm-key.bin`. `LITELLM_BASE_URL` can supply the server address. Each service remembers its own model and key. The proxy must expose `/v1/models` and `/v1/model/info` with `mode` and `supports_audio_input` metadata; an unavailable catalog shows an error; reopening Settings retries the request. When `/v1/models` rejects an exhausted key budget, the authenticated metadata catalog still supplies model choices and a spending-limit warning. Failed transcriptions retain audio for retry. Chat models with audio input use `/v1/chat/completions`; dedicated transcription models use `/v1/audio/transcriptions`.
 
-By default, hold **Ctrl+Space** to record, speak, release it to transcribe, and press **Ctrl+Alt+J** to open history. **Esc** cancels recording or processing. The indicator turns green once microphone sound is detected; silent buffers do not confirm working input. If no sound is detected within five seconds, recording stops with a visible error. Silent or unusably short recordings are not transcribed. Set your own shortcuts in Settings; they save automatically after you release the keys. Existing installations keep their shortcuts and other settings.
+By default, hold **Ctrl+Space** (RightAlt on macOS) to record, speak, release it to transcribe, and press **Ctrl+Alt+J** to open history. **Esc** cancels recording or processing. The indicator turns green once microphone sound is detected; silent buffers do not confirm working input. If no sound is detected within five seconds, recording stops with a visible error. Silent or unusably short recordings are not transcribed. Set your own shortcuts in Settings; they save automatically after you release the keys. Existing installations keep their shortcuts and other settings.
 
 Closing the window hides it in the tray. Click the **Govori** Desktop or Start menu shortcut to open it again, or use the tray menu. A second launch opens the existing app; it does not start another recorder. Choose Exit to quit. Start at login can also be enabled or disabled in Settings. `start.ps1` / `start.cmd` is a compatibility helper that opens the installed app and installs it first if needed. Normal launches of a build from another folder also forward to the installed EXE. Developers can use `--portable` or an explicit `--data-dir` to bypass that forwarding; copies using the same data directory still share one instance. Windows keyboard shortcuts run on a dedicated message thread so a slow interface cannot make Windows remove the keyboard hook.
 
@@ -79,13 +79,15 @@ bash build.sh
 ./artifacts/publish/linux-x64/Govori.CrossPlatform
 # Or select a runtime explicitly:
 bash build.sh osx-arm64
+# macOS app bundle (required for microphone access):
+bash package-macos.sh
 ```
 
 The shared interface, recording and Gemini client are cross-platform. Windows desktop integration has been tested. Linux and macOS adapters are implemented and require verification on those systems.
 
 - **Linux / X11:** global shortcuts use XGrabKey; paste uses XTest. Install X11, Xtst, the audio backend libraries used by PortAudio, and Avalonia's desktop dependencies. Ubuntu packages typically include `libx11-6`, `libxtst6`, `libasound2`, `libpulse0` and `libfontconfig1`. Package names vary by distribution.
 - **Wayland:** use the Record button, history and copy. Global shortcuts and automatic paste currently require an X11 session.
-- **macOS:** allow Microphone, Input Monitoring and Accessibility access. Global shortcuts do not suppress the original key; function keys may require Fn. Distribution as a signed `.app` with microphone usage metadata is not implemented yet.
+- **macOS:** run `bash package-macos.sh`, copy `artifacts/macos/<runtime>/Govori.app` to `/Applications` or `~/Applications` and open it. Govori runs in the menu bar. On first start it asks for Accessibility (paste) and Input Monitoring (shortcuts); allow both in System Settings and reopen Govori. The microphone prompt appears with the first recording. The bundle is ad-hoc signed, so macOS asks again after every rebuild. Global shortcuts do not suppress the original key, so new installations hold **RightAlt** (right Option) to dictate: Ctrl+Space switches input sources, and Option+letter shortcuts type characters into the active app while held. Pressing another key while holding RightAlt or RightCtrl (for example Option+arrow) cancels the recording without sending it. Function keys may require Fn. The ad-hoc signature has no Apple Team ID, so macOS cannot verify who built the app; build it yourself from source you trust. Command+Q quits Govori; closing the window keeps it in the menu bar.
 
 ## Repository layout
 
