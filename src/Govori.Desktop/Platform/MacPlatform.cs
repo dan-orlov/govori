@@ -6,7 +6,7 @@ namespace Govori;
 
 internal sealed class MacPlatform : IDesktopPlatform
 {
-    public string? Limitation => Localization.T("MacLimitation");
+    public string? Limitation => !Quartz.Trusted() ? Localization.T("MacAccessibility") : !Quartz.PreflightListen() ? Localization.T("MacInputMonitoring") : Localization.T("MacLimitation");
     public nint ForegroundWindow()
     {
         var workspace = ObjC.Send(ObjC.Class("NSWorkspace"), ObjC.Selector("sharedWorkspace"));
@@ -29,7 +29,16 @@ internal sealed class MacPlatform : IDesktopPlatform
         bool Has(int vk) => Keycodes.TryGetValue(vk, out var code) && Quartz.KeyState(0, code);
         return key switch { 0x11 => Has(0xA2) || Has(0xA3), 0x12 => Has(0xA4) || Has(0xA5), 0x10 => Has(0xA0) || Has(0xA1), _ => Has(key) };
     }
+    // kCGEventSourceStateCombinedSessionState, kCGEventKeyDown
+    internal static uint KeyDownCount() => Quartz.KeyDownCount(0, 10);
     public bool ModifiersDown => IsDown(0x11) || IsDown(0x12) || IsDown(0x10) || IsDown(0x5B) || IsDown(0x5C);
+    // Without these calls macOS never lists Govori under Accessibility and
+    // Input Monitoring, and key polling and paste fail silently.
+    public void RequestPermissions()
+    {
+        if (!Quartz.Trusted()) Quartz.PromptTrust();
+        if (!Quartz.PreflightListen()) Quartz.RequestListen();
+    }
     public void Paste()
     {
         if (!Quartz.Trusted()) throw new InvalidOperationException(Localization.T("MacAccessibility"));
@@ -48,7 +57,7 @@ internal sealed class MacPlatform : IDesktopPlatform
         if (!enabled) { if (File.Exists(path)) File.Delete(path); return; }
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         string executable = SecurityElement.Escape(Environment.ProcessPath)!;
-        File.WriteAllText(path, $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>local.govori.crossplatform</string><key>ProgramArguments</key><array><string>{executable}</string><string>--tray</string></array><key>RunAtLoad</key><true/></dict></plist>");
+        File.WriteAllText(path, $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>local.govori.crossplatform</string><key>ProgramArguments</key><array><string>{executable}</string><string>--tray</string></array><key>EnvironmentVariables</key><dict><key>DOTNET_EnableDiagnostics</key><string>0</string></dict><key>RunAtLoad</key><true/></dict></plist>");
     }
     public void ConfigureOverlay(Window window)
     {
@@ -68,12 +77,29 @@ internal sealed class MacPlatform : IDesktopPlatform
     private static class Quartz
     {
         private const string Lib = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
+        [DllImport(Lib, EntryPoint="CGEventSourceCounterForEventType")] internal static extern uint KeyDownCount(int source, uint type);
         [DllImport(Lib, EntryPoint="CGEventSourceKeyState")][return:MarshalAs(UnmanagedType.I1)] internal static extern bool KeyState(int source, ushort key);
         [DllImport(Lib, EntryPoint="CGEventCreateKeyboardEvent")] internal static extern nint KeyboardEvent(nint source, ushort key, [MarshalAs(UnmanagedType.I1)] bool down);
         [DllImport(Lib, EntryPoint="CGEventSetFlags")] internal static extern void SetFlags(nint e, ulong flags);
         [DllImport(Lib, EntryPoint="CGEventPost")] internal static extern void Post(int location, nint e);
         [DllImport(Lib, EntryPoint="AXIsProcessTrusted")][return:MarshalAs(UnmanagedType.I1)] internal static extern bool Trusted();
-        [DllImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", EntryPoint="CFRelease")] internal static extern void Release(nint value);
+        [DllImport(Lib, EntryPoint="AXIsProcessTrustedWithOptions")][return:MarshalAs(UnmanagedType.I1)] private static extern bool TrustedWithOptions(nint options);
+        [DllImport(Lib, EntryPoint="CGPreflightListenEventAccess")][return:MarshalAs(UnmanagedType.I1)] internal static extern bool PreflightListen();
+        [DllImport(Lib, EntryPoint="CGRequestListenEventAccess")][return:MarshalAs(UnmanagedType.I1)] internal static extern bool RequestListen();
+        private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+        [DllImport(CoreFoundation, EntryPoint="CFRelease")] internal static extern void Release(nint value);
+        [DllImport(CoreFoundation, EntryPoint="CFDictionaryCreate")] private static extern nint DictionaryCreate(nint allocator, nint[] keys, nint[] values, nint count, nint keyCallBacks, nint valueCallBacks);
+        // AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true}) shows the system prompt and lists the app.
+        internal static void PromptTrust()
+        {
+            nint services = NativeLibrary.Load(Lib), foundation = NativeLibrary.Load(CoreFoundation);
+            nint key = Marshal.ReadIntPtr(NativeLibrary.GetExport(services, "kAXTrustedCheckOptionPrompt"));
+            nint value = Marshal.ReadIntPtr(NativeLibrary.GetExport(foundation, "kCFBooleanTrue"));
+            nint options = DictionaryCreate(0, [key], [value], 1, NativeLibrary.GetExport(foundation, "kCFTypeDictionaryKeyCallBacks"), NativeLibrary.GetExport(foundation, "kCFTypeDictionaryValueCallBacks"));
+            if (options == 0) return;
+            try { TrustedWithOptions(options); }
+            finally { Release(options); }
+        }
     }
 }
 
@@ -91,6 +117,7 @@ internal sealed class MacHotkeys : HotkeyState
     private async Task Pump()
     {
         var previous = new HashSet<int>();
+        uint? keyDowns = null;
         try
         {
             while (!cancellation.IsCancellationRequested)
@@ -101,6 +128,11 @@ internal sealed class MacHotkeys : HotkeyState
                     if (down != was) HandleKey(key, down, !down, false);
                     if (down) previous.Add(key); else previous.Remove(key);
                 }
+                // Only the keys above are polled. Count key-down events to notice
+                // chords such as right Option+arrow while RightAlt is held.
+                if (!Holding) keyDowns = null;
+                else if (keyDowns is not { } before) keyDowns = MacPlatform.KeyDownCount();
+                else if (MacPlatform.KeyDownCount() != before) CancelChord();
                 await Task.Delay(10, cancellation.Token);
             }
         }

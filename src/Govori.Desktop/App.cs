@@ -34,7 +34,14 @@ public sealed class App : Application
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
             CreateTray(window, desktop);
             desktop.Exit += (_, _) => { tray?.Dispose(); Controller.Dispose(); };
-            window.Closing += (_, e) => { if (!Controller.IsExiting && !args.Contains("--verify") && !args.Contains("--preview")) { e.Cancel = true; window.Hide(); } };
+            // Only the close button hides the window. Quit requests (Command+Q, Dock),
+            // logout and shutdown also close the indicator windows, so they must exit.
+            window.Closing += (_, e) => { if (!Controller.IsExiting && e.CloseReason is not (WindowCloseReason.ApplicationShutdown or WindowCloseReason.OSShutdown) && !args.Contains("--verify") && !args.Contains("--preview")) { e.Cancel = true; window.Hide(); } };
+            if (!args.Contains("--verify") && !args.Contains("--preview"))
+            {
+                try { Controller.Platform.RequestPermissions(); }
+                catch (Exception ex) { Controller.SetStatus(ex.Message); }
+            }
             if (args.Contains("--tray"))
             {
                 EventHandler? hideOnStartup = null;

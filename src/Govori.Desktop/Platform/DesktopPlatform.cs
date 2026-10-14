@@ -11,6 +11,7 @@ internal interface IDesktopPlatform : IDisposable
     bool IsDown(int key);
     bool ModifiersDown { get; }
     void Paste();
+    void RequestPermissions() { }
     IGlobalHotkeys CreateHotkeys(Hotkey dictation, Hotkey history);
     void ConfigureStartup(bool enabled);
     void ConfigureOverlay(Window window);
@@ -53,7 +54,9 @@ public sealed record Hotkey(int Key, bool Ctrl, bool Alt, bool Shift, bool Win, 
         string label = string.Join('+', new[] { ctrl ? "Ctrl" : null, alt ? "Alt" : null, shift ? "Shift" : null, win ? "Win" : null, name }.Where(x => x != null));
         return new(key, ctrl, alt, shift, win, label);
     }
-    internal bool Matches(IDesktopPlatform platform) => Ctrl == platform.IsDown(0x11) && Alt == platform.IsDown(0x12) && Shift == platform.IsDown(0x10) && Win == (platform.IsDown(0x5B) || platform.IsDown(0x5C));
+    // RightAlt and RightCtrl are modifiers themselves. Polled key state (macOS)
+    // already reports them as held, so they must not count as extra modifiers.
+    internal bool Matches(IDesktopPlatform platform) => (Key == 0xA3 || Ctrl == platform.IsDown(0x11)) && (Key == 0xA5 || Alt == platform.IsDown(0x12)) && Shift == platform.IsDown(0x10) && Win == (platform.IsDown(0x5B) || platform.IsDown(0x5C));
 }
 
 internal abstract class HotkeyState : IGlobalHotkeys
@@ -75,12 +78,23 @@ internal abstract class HotkeyState : IGlobalHotkeys
         if (up && holding && ((Dictation.Ctrl && key is 0x11 or 0xA2 or 0xA3) || (Dictation.Alt && key is 0x12 or 0xA4 or 0xA5) || (Dictation.Shift && key is 0x10 or 0xA0 or 0xA1) || (Dictation.Win && key is 0x5B or 0x5C))) { holding = false; Released?.Invoke(); }
         if (up && swallowed.Remove(key)) { if (key == Dictation.Key && holding) { holding = false; Released?.Invoke(); } return true; }
         if (!down) return false;
+        if (key is not (0x1B or 0x10 or 0x11 or 0x12 or 0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5 or 0x5B or 0x5C)) CancelChord();
         if (swallowed.Contains(key)) return true;
-        if (Recording && key == 0x1B) { swallowed.Add(key); Cancelled?.Invoke(); return true; }
+        if (Recording && key == 0x1B) { swallowed.Add(key); holding = false; Recording = false; Cancelled?.Invoke(); return true; }
         if (!Enabled) return false;
         if (key == History.Key && (match ?? History.Matches(Platform))) { swallowed.Add(key); HistoryRequested?.Invoke(); return true; }
         if (key == Dictation.Key && (match ?? Dictation.Matches(Platform))) { swallowed.Add(key); holding = true; Pressed?.Invoke(); return true; }
         return false;
+    }
+    protected bool Holding => holding;
+    // RightAlt and RightCtrl are also typing modifiers (Option+arrow, AltGr).
+    // Another key pressed while one is held as the dictation key makes a
+    // chord, so the recording is dropped instead of transcribed and pasted.
+    protected void CancelChord()
+    {
+        if (!holding || Dictation.Key is not (0xA3 or 0xA5)) return;
+        holding = false;
+        if (Recording) { Recording = false; Cancelled?.Invoke(); }
     }
     public abstract void Dispose();
 }

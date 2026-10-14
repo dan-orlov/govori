@@ -7,6 +7,9 @@
     <AssemblyName>Govori.CrossPlatform</AssemblyName>
     <ApplicationIcon>Assets/govori.ico</ApplicationIcon>
     <MSBuildEnableWorkloadResolver>false</MSBuildEnableWorkloadResolver>
+    <!-- Govori holds microphone, paste and keyboard permissions; do not let
+         DOTNET_STARTUP_HOOKS load foreign code into it. -->
+    <StartupHookSupport Condition="'$(Configuration)' == 'Release'">false</StartupHookSupport>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />

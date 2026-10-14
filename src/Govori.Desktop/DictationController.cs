@@ -246,6 +246,9 @@ internal sealed class DictationController : IDisposable
     }
     public void Dispose()
     {
-        IsExiting = true; timer.Stop(); Hotkeys.Dispose(); Recorder.Dispose(); Platform.Dispose(); Transcriber.Dispose(); overlay?.Close();
+        IsExiting = true; timer.Stop(); Hotkeys.Dispose();
+        // Quit requests (Command+Q, logout) skip ExitAsync; drop the unfinished recording.
+        if (Recording) try { if (Recorder.StopAsync().GetAwaiter().GetResult() is { } audio) File.Delete(audio.Path); } catch { }
+        Recorder.Dispose(); Platform.Dispose(); Transcriber.Dispose(); overlay?.Close();
     }
 }
