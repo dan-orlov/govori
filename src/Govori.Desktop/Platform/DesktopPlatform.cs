@@ -56,7 +56,8 @@ public sealed record Hotkey(int Key, bool Ctrl, bool Alt, bool Shift, bool Win, 
     }
     // RightAlt and RightCtrl are modifiers themselves. Polled key state (macOS)
     // already reports them as held, so they must not count as extra modifiers.
-    internal bool Matches(IDesktopPlatform platform) => (Key == 0xA3 || Ctrl == platform.IsDown(0x11)) && (Key == 0xA5 || Alt == platform.IsDown(0x12)) && Shift == platform.IsDown(0x10) && Win == (platform.IsDown(0x5B) || platform.IsDown(0x5C));
+    internal bool Matches(IDesktopPlatform platform) => Matches(platform.IsDown(0x11), platform.IsDown(0x12), platform.IsDown(0x10), platform.IsDown(0x5B) || platform.IsDown(0x5C));
+    internal bool Matches(bool ctrl, bool alt, bool shift, bool win) => (Key == 0xA3 || Ctrl == ctrl) && (Key == 0xA5 || Alt == alt) && Shift == shift && Win == win;
 }
 
 internal abstract class HotkeyState : IGlobalHotkeys

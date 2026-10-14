@@ -6,7 +6,8 @@ namespace Govori;
 
 internal sealed class MacPlatform : IDesktopPlatform
 {
-    public string? Limitation => !Quartz.Trusted() ? Localization.T("MacAccessibility") : !Quartz.PreflightListen() ? Localization.T("MacInputMonitoring") : Localization.T("MacLimitation");
+    public string? Limitation => !Quartz.Trusted() ? Localization.T("MacAccessibility") : MacKeyTap.Running ? null : !Quartz.PreflightListen() ? Localization.T("MacInputMonitoring") : Localization.T("MacLimitation");
+    internal static bool Trusted => Quartz.Trusted();
     public nint ForegroundWindow()
     {
         var workspace = ObjC.Send(ObjC.Class("NSWorkspace"), ObjC.Selector("sharedWorkspace"));
@@ -33,11 +34,12 @@ internal sealed class MacPlatform : IDesktopPlatform
     internal static uint KeyDownCount() => Quartz.KeyDownCount(0, 10);
     public bool ModifiersDown => IsDown(0x11) || IsDown(0x12) || IsDown(0x10) || IsDown(0x5B) || IsDown(0x5C);
     // Without these calls macOS never lists Govori under Accessibility and
-    // Input Monitoring, and key polling and paste fail silently.
+    // Input Monitoring, and shortcuts and paste fail silently. Accessibility
+    // also allows the key tap; Input Monitoring is only needed for polling.
     public void RequestPermissions()
     {
         if (!Quartz.Trusted()) Quartz.PromptTrust();
-        if (!Quartz.PreflightListen()) Quartz.RequestListen();
+        else if (!MacKeyTap.Running && !Quartz.PreflightListen()) Quartz.RequestListen();
     }
     public void Paste()
     {
@@ -105,23 +107,37 @@ internal sealed class MacPlatform : IDesktopPlatform
 
 internal sealed class MacHotkeys : HotkeyState
 {
+    // Key codes back to virtual keys; modifiers that share a code map to the specific left key.
+    private static readonly Dictionary<int, int> Keys = MacPlatform.Keycodes.GroupBy(p => (int)p.Value).ToDictionary(g => g.Key, g => g.Max(p => p.Key));
     private readonly CancellationTokenSource cancellation = new();
     private readonly Task loop;
+    private MacKeyTap? tap;
     public MacHotkeys(IDesktopPlatform platform, Hotkey dictation, Hotkey history) : base(platform, dictation, history)
     {
-        Validate(dictation); Validate(history); loop = Task.Run(Pump);
+        Validate(dictation); Validate(history); tap = MacKeyTap.TryStart(OnKey); loop = Task.Run(Pump);
     }
     public override Hotkey Dictation { get => base.Dictation; set { Validate(value); base.Dictation = value; } }
     public override Hotkey History { get => base.History; set { Validate(value); base.History = value; } }
     private static void Validate(Hotkey hotkey) { if (!MacPlatform.Keycodes.ContainsKey(hotkey.Key)) throw new FormatException(Localization.T("MacUnsupportedKey")); }
+    private bool OnKey(int code, bool down, bool up, bool injected, ulong flags)
+    {
+        if (!Keys.TryGetValue(code, out int key)) { if (down && !injected) CancelChord(); return false; }
+        var hotkey = Dictation.Key == History.Key ? null : key == Dictation.Key ? Dictation : key == History.Key ? History : null;
+        return HandleKey(key, down, up, injected, hotkey?.Matches((flags & 0x40000) != 0, (flags & 0x80000) != 0, (flags & 0x20000) != 0, (flags & 0x100000) != 0));
+    }
+    // Without Accessibility there is no key tap: poll key state instead. The
+    // original key then still reaches the active application.
     private async Task Pump()
     {
         var previous = new HashSet<int>();
         uint? keyDowns = null;
         try
         {
-            while (!cancellation.IsCancellationRequested)
+            for (int tick = 0; !cancellation.IsCancellationRequested; tick++)
             {
+                // Accessibility can be granted while Govori runs.
+                if (tap == null && tick % 100 == 0 && MacPlatform.Trusted) tap = MacKeyTap.TryStart(OnKey);
+                if (tap != null) { previous.Clear(); keyDowns = null; await Task.Delay(100, cancellation.Token); continue; }
                 foreach (int key in new[] { Dictation.Key, History.Key, 0x1B, 0x11, 0xA3, 0x12, 0xA5, 0x10, 0xA1, 0x5B, 0x5C }.Distinct())
                 {
                     bool down = Platform.IsDown(key), was = previous.Contains(key);
@@ -138,5 +154,90 @@ internal sealed class MacHotkeys : HotkeyState
         }
         catch (OperationCanceledException) { }
     }
-    public override void Dispose() { cancellation.Cancel(); loop.GetAwaiter().GetResult(); cancellation.Dispose(); }
+    public override void Dispose() { cancellation.Cancel(); loop.GetAwaiter().GetResult(); tap?.Dispose(); cancellation.Dispose(); }
+}
+
+// An event tap sees keys before other applications, so Govori can swallow its
+// shortcuts like the Windows keyboard hook does. It requires Accessibility.
+internal sealed class MacKeyTap : IDisposable
+{
+    internal delegate bool Handler(int keycode, bool down, bool up, bool injected, ulong flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate nint Callback(nint proxy, uint type, nint e, nint user);
+    // Device-dependent flag bits tell which modifier changed in a flags-changed event.
+    private static readonly Dictionary<int, ulong> ModifierBits = new() { [59] = 0x1, [56] = 0x2, [60] = 0x4, [55] = 0x8, [54] = 0x10, [58] = 0x20, [61] = 0x40, [62] = 0x2000 };
+    internal static bool Running { get; private set; }
+    private readonly Handler handler;
+    private readonly Callback callback;
+    private readonly Thread thread;
+    private nint port, loop;
+    private MacKeyTap(Handler handler)
+    {
+        this.handler = handler; callback = OnEvent;
+        using var started = new ManualResetEventSlim();
+        thread = new Thread(() => Run(started)) { IsBackground = true, Name = "Govori key tap" };
+        thread.Start(); started.Wait();
+    }
+    internal static MacKeyTap? TryStart(Handler handler)
+    {
+        var tap = new MacKeyTap(handler);
+        if (tap.port == 0) { tap.thread.Join(); return null; }
+        Running = true; return tap;
+    }
+    private void Run(ManualResetEventSlim started)
+    {
+        const ulong keys = (1ul << 10) | (1ul << 11) | (1ul << 12); // key down, key up, flags changed
+        // The HID level comes before system shortcuts such as Ctrl+Space.
+        port = Native.TapCreate(0, 0, 0, keys, callback, 0);
+        if (port == 0) port = Native.TapCreate(1, 0, 0, keys, callback, 0);
+        if (port == 0) { started.Set(); return; }
+        nint source = Native.CreateRunLoopSource(0, port, 0);
+        loop = Native.CurrentRunLoop();
+        Native.AddSource(loop, source, Native.CommonModes);
+        Native.TapEnable(port, true);
+        started.Set();
+        Native.RunLoop();
+        Native.TapEnable(port, false); Native.Invalidate(port); Native.Release(source); Native.Release(port);
+    }
+    private nint OnEvent(nint proxy, uint type, nint e, nint user)
+    {
+        // macOS disables a tap after a timeout or user input; turn it back on.
+        if (type is 0xFFFFFFFE or 0xFFFFFFFF) { Native.TapEnable(port, true); return e; }
+        try
+        {
+            int code = (int)Native.IntegerField(e, 9); // kCGKeyboardEventKeycode
+            bool injected = Native.IntegerField(e, 41) == Environment.ProcessId; // kCGEventSourceUnixProcessID: our own Command+V
+            ulong flags = Native.Flags(e);
+            bool down = type == 10, up = type == 11;
+            if (type == 12)
+            {
+                if (!ModifierBits.TryGetValue(code, out ulong bit)) return e;
+                down = (flags & bit) != 0; up = !down;
+            }
+            // Returning null drops the event before other applications see it.
+            return handler(code, down, up, injected, flags) ? 0 : e;
+        }
+        catch { return e; }
+    }
+    public void Dispose()
+    {
+        Running = false;
+        Native.StopRunLoop(loop); thread.Join(1000);
+    }
+    private static class Native
+    {
+        private const string Services = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
+        private const string Foundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+        [DllImport(Services, EntryPoint="CGEventTapCreate")] internal static extern nint TapCreate(uint tap, uint place, uint options, ulong events, Callback callback, nint user);
+        [DllImport(Services, EntryPoint="CGEventTapEnable")] internal static extern void TapEnable(nint tap, [MarshalAs(UnmanagedType.I1)] bool enable);
+        [DllImport(Services, EntryPoint="CGEventGetIntegerValueField")] internal static extern long IntegerField(nint e, uint field);
+        [DllImport(Services, EntryPoint="CGEventGetFlags")] internal static extern ulong Flags(nint e);
+        [DllImport(Foundation, EntryPoint="CFMachPortCreateRunLoopSource")] internal static extern nint CreateRunLoopSource(nint allocator, nint port, nint order);
+        [DllImport(Foundation, EntryPoint="CFMachPortInvalidate")] internal static extern void Invalidate(nint port);
+        [DllImport(Foundation, EntryPoint="CFRunLoopGetCurrent")] internal static extern nint CurrentRunLoop();
+        [DllImport(Foundation, EntryPoint="CFRunLoopAddSource")] internal static extern void AddSource(nint loop, nint source, nint mode);
+        [DllImport(Foundation, EntryPoint="CFRunLoopRun")] internal static extern void RunLoop();
+        [DllImport(Foundation, EntryPoint="CFRunLoopStop")] internal static extern void StopRunLoop(nint loop);
+        [DllImport(Foundation, EntryPoint="CFRelease")] internal static extern void Release(nint value);
+        internal static nint CommonModes => Marshal.ReadIntPtr(NativeLibrary.GetExport(NativeLibrary.Load(Foundation), "kCFRunLoopCommonModes"));
+    }
 }
