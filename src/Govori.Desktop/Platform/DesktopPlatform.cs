@@ -24,6 +24,8 @@ internal interface IGlobalHotkeys : IDisposable
     bool Enabled { get; set; }
     bool Recording { get; set; }
     event Action? Pressed, Released, Cancelled, Discarded, HistoryRequested;
+    // The platform's Limitation may have changed, for example after a permission was granted.
+    event Action? LimitationChanged;
 }
 
 internal static class DesktopPlatform
@@ -77,7 +79,7 @@ internal abstract class HotkeyState : IGlobalHotkeys
     public virtual Hotkey History { get => history; set => history = value; }
     public bool Enabled { get => enabled; set => enabled = value; }
     public bool Recording { get => recording; set => recording = value; }
-    public event Action? Pressed, Released, Cancelled, Discarded, HistoryRequested;
+    public event Action? Pressed, Released, Cancelled, Discarded, HistoryRequested, LimitationChanged;
     protected HotkeyState(IDesktopPlatform platform, Hotkey dictation, Hotkey history) { Platform = platform; Dictation = dictation; History = history; }
     internal bool HandleKey(int key, bool down, bool up, bool injected, bool? match = null)
     {
@@ -106,6 +108,7 @@ internal abstract class HotkeyState : IGlobalHotkeys
     private void Start() { started = true; Pressed?.Invoke(); }
     private void Release() { holding = false; if (started) { started = false; Released?.Invoke(); } }
     protected bool Holding => holding;
+    protected void OnLimitationChanged() => LimitationChanged?.Invoke();
     // Another key or a click while RightAlt or RightCtrl is held as the
     // dictation key makes a chord: drop the recording instead of sending it.
     protected void CancelChord()

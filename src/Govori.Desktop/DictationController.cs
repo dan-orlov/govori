@@ -43,6 +43,7 @@ internal sealed class DictationController : IDisposable
         // Posted after StartRecording, so a recording that was still opening is dropped too.
         Hotkeys.Discarded += () => Dispatcher.UIThread.Post(() => { if (Recording) { cancelled = true; _ = StopRecordingAsync(); } });
         Hotkeys.HistoryRequested += () => Dispatcher.UIThread.Post(() => window?.OpenHistory());
+        Hotkeys.LimitationChanged += () => Dispatcher.UIThread.Post(() => { if (!Busy) SetIdleStatus(); });
         timer.Tick += (_, _) =>
         {
             if (!Recording) return;
@@ -237,7 +238,8 @@ internal sealed class DictationController : IDisposable
     }
     private void SetIdleStatus() => SetStatus(string.IsNullOrWhiteSpace(Configuration.GetApiKey(Settings.Provider))
         ? Localization.T("ApiKeyNotFound")
-        : Localization.T("Ready"));
+        // Missing permissions (macOS) or Wayland leave the shortcut silent; say why.
+        : Platform.Limitation ?? Localization.T("Ready"));
     public async Task ExitAsync()
     {
         if (IsExiting) return;

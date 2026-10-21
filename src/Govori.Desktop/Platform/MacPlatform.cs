@@ -136,9 +136,9 @@ internal sealed class MacHotkeys : HotkeyState
         {
             for (int tick = 0; !cancellation.IsCancellationRequested; tick++)
             {
-                // Accessibility can be granted while Govori runs.
-                if (tap is { Alive: false }) { tap.Dispose(); tap = null; }
-                if (tap == null && tick % 100 == 0 && MacPlatform.Trusted) tap = MacKeyTap.TryStart(OnKey);
+                // Accessibility can be granted while Govori runs; the status then changes.
+                if (tap is { Alive: false }) { tap.Dispose(); tap = null; OnLimitationChanged(); }
+                if (tap == null && tick % 100 == 0 && MacPlatform.Trusted && (tap = MacKeyTap.TryStart(OnKey)) != null) OnLimitationChanged();
                 if (tap != null) { previous.Clear(); keyDowns = null; await Task.Delay(1000, cancellation.Token); continue; }
                 foreach (int key in new[] { Dictation.Key, History.Key, 0x1B, 0x11, 0xA3, 0x12, 0xA5, 0x10, 0xA1, 0x5B, 0x5C }.Distinct())
                 {
