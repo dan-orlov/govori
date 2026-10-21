@@ -10,5 +10,5 @@ case "$(uname -s)-$(uname -m)" in
   *) echo 'Specify a .NET runtime identifier as the first argument.' >&2; exit 1 ;;
 esac
 rid="${1:-$default_rid}"
-dotnet publish src/Govori.Desktop/Govori.Desktop.csproj -c Release -r "$rid" --self-contained true --artifacts-path artifacts/dotnet -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o "artifacts/publish/$rid" --nologo
+dotnet publish src/Govori.Desktop/Govori.Desktop.csproj -c Release -r "$rid" --self-contained true --artifacts-path artifacts/dotnet -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o "artifacts/publish/$rid" --nologo "${@:2}"
 echo "Built: artifacts/publish/$rid/Govori.CrossPlatform"

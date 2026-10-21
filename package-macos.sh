@@ -8,12 +8,18 @@ case "$(uname -m)" in
   *) default_rid=osx-x64 ;;
 esac
 rid="${1:-$default_rid}"
-bash build.sh "$rid"
 publish="artifacts/publish/$rid"
+# Native libraries stay beside the executable so they are signed inside the
+# bundle. Self-extraction would load them from a folder other processes can
+# write to, and library validation would reject them. A clean output keeps
+# libraries from earlier builds out of the bundle.
+rm -rf "$publish"
+bash build.sh "$rid" -p:IncludeNativeLibrariesForSelfExtract=false
 app="artifacts/macos/$rid/Govori.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$publish/Govori.CrossPlatform" "$publish"/*.dylib "$app/Contents/MacOS/"
+cp -R "$publish/ThirdPartyNotices" "$app/Contents/Resources/"
 iconset="artifacts/macos/$rid/govori.iconset"
 rm -rf "$iconset" && mkdir -p "$iconset"
 for size in 16 32 128 256; do
@@ -47,7 +53,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>LSUIElement</key><true/>
   <key>NSAppSleepDisabled</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Govori records your voice while you hold the dictation shortcut and sends it to Google Gemini for transcription.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Govori records your voice while you hold the dictation shortcut and sends it to the transcription service selected in Settings (Gemini or LiteLLM).</string>
 </dict>
 </plist>
 PLIST
